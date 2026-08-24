@@ -1,0 +1,7 @@
+text
+
+streamlit
+pandas
+numpy
+requests
+vnstock
