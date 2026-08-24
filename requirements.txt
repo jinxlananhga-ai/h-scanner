@@ -1,7 +1,7 @@
 text
-
 streamlit
 pandas
 numpy
 requests
+--no-deps
 vnstock
