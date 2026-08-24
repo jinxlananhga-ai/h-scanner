@@ -1,119 +1,193 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import subprocess
+import sys
 
+# Tự động cài đặt vnstock ngầm để tránh lỗi xung đột hệ thống Streamlit
 try:
-    from vnstock.api.quote import Quote
+  import vnstock
 except ImportError:
-    pass
+  subprocess.run(
+      [sys.executable, "-m", "pip", "install", "vnstock", "--no-deps"],
+      check=True,
+  )
 
-st.set_page_config(page_title="Hệ Thống Quét Sóng Real-Time 150+ Mã", layout="wide")
+import concurrent.futures
+from datetime import datetime
+import time
+import numpy as np
+import pandas as pd
+import streamlit as st
+from vnstock import stock_historical_data
 
-st.title("🚀 HỆ THỐNG QUÉT SÓNG THỜI GIAN THỰC (KHUNG 5 PHÚT)")
-st.markdown("Hệ thống đa luồng tốc độ cao quét toàn bộ danh sách mã cổ phiếu, lọc ra các mã có thanh khoản đột biến so với trung bình 20 nến 5 phút gần nhất.")
+st.set_page_config(
+    page_title="Hệ Thống Quét Sóng Thời Gian Thực", page_icon="🚀", layout="wide"
+)
 
-# Tích hợp toàn bộ danh sách mã cổ phiếu của bạn vào đây
 DEFAULT_SYMBOLS = [
-    "SHS", "VND", "GEX", "VDS", "PHP", "VIX", "HCM", "VRE", "IDC", 
-    "ACB", "HSG", "VPB", "TV2", "NLG", "PAN", "VGS", "EVF", "PHR", 
-    "CTD", "PVD", "PET", "ELC", "NAB", "CTR", "OCB", "GAS", "TCH", 
-    "SBG", "DXG", "HPG", "CTG", "TCB", "DPR", "POW", "MSB", "BFC", 
-    "MSR", "GMD", "FCN", "DCM", "VSC", "VCK", "VOS", "MWG", "FPT", 
-    "PAC", "VCG", "GVR", "HAH", "ACV", "VTO", "BAF", "NT2", "NTP", 
-    "PVS", "LPB", "BSR", "CTS", "VCI", "BVS", "EVS", "APS", "CII", 
-    "HDG", "DBC", "GIL", "BVB", "QCG", "OIL", "DDV", "YEG", "PVP", 
-    "KBC", "HHP", "VEA", "AGG", "CEO", "FTS", "KDH", "SZC", "BIC", 
-    "DRI", "ANV", "G36", "HHV", "GEG", "TNG", "VGT", "IJC", "DXP", 
-    "KLB", "QTP", "D2D", "DTD", "FOX", "HUT", "BVH", "AAS", "ORS", 
-    "PNJ", "SSI", "DIG", "PDR", "TCX", "CSV", "NVB", "TPB", "DPM", 
-    "HDB", "BMS", "VGC", "BMP", "PSD", "HAG", "MSH", "NTL", "SAB", 
-    "ITC", "VTP", "MBS", "HHS", "BSI", "L14", "AGR", "DPG", "EIB", 
-    "BID", "TCI", "NKG", "NVL", "MIG", "PC1", "VIB", "LCG", "VPI", 
-    "TVN", "PVC", "SSB", "VGI", "AAV", "VIW", "DHC"
+    "HPG",
+    "VIC",
+    "VHM",
+    "VRE",
+    "VCB",
+    "BID",
+    "CTG",
+    "TCB",
+    "MBB",
+    "ACB",
+    "VPB",
+    "STB",
+    "SHB",
+    "LPB",
+    "SSB",
+    "MSN",
+    "VNM",
+    "SAB",
+    "GAS",
+    "POW",
+    "FPT",
+    "MWG",
+    "PNJ",
+    "REE",
+    "NVL",
+    "DIG",
+    "PDR",
+    "KDH",
+    "CEO",
+    "SSI",
+    "VCI",
+    "VND",
+    "HCM",
+    "MBS",
+    "FTS",
+    "BSI",
+    "ORS",
+    "VIX",
+    "DGC",
+    "DCM",
+    "DPM",
+    "GEX",
+    "VGC",
+    "KBC",
+    "IDC",
+    "VHC",
+    "ANV",
+    "HHV",
+    "LCG",
+    "VCG",
+    "CII",
+    "PC1",
+    "VPI",
+    "TVN",
+    "PAS",
+    "HAG",
+    "DBC",
+    "BAF",
+    "SBT",
+    "ASM",
+    "HSG",
+    "NKG",
+    "TLG",
+    "PTB",
 ]
 
-st.sidebar.header("⚙️ Tùy chỉnh quét thời gian thực")
-selected_symbols = st.sidebar.multiselect("Danh sách mã theo dõi:", DEFAULT_SYMBOLS, default=DEFAULT_SYMBOLS)
-volume_multiplier = st.sidebar.slider("Ngưỡng đột biến khối lượng (X lần so với TB 20 nến 5p):", 1.5, 5.0, 2.0, 0.1)
-max_threads = st.sidebar.slider("Số luồng xử lý song song (Tốc độ):", 5, 30, 15)
+st.markdown(
+    """
+    <h2 style='text-align: center; color: #FF4B4B;'>🚀 HỆ THỐNG QUÉT SÓNG THỜI GIAN THỰC (KHUNG 5 PHÚT)</h2>
+""",
+    unsafe_allow_html=True,
+)
+st.write(
+    "Hệ thống đa luồng tốc độ cao quét toàn bộ danh sách mã cổ phiếu, lọc ra"
+    " các mã có thanh khoản đột biến so với trung bình 20 nến 5 phút gần nhất."
+)
 
-# Hàm quét từng mã độc lập an toàn
-def scan_single_symbol(symbol, volume_multiplier):
-    try:
-        today = datetime.now().strftime('%Y-%m-%d')
-        start_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
-        
-        q = Quote(symbol=symbol, source='VCI')
-        df = q.history(start=start_date, end=today, interval='5m')
-        
-        if df is not None and len(df) > 20:
-            df.columns = [str(c).strip().lower() for c in df.columns]
-            col_map = {}
-            for c in df.columns:
-                if 'time' in c or 'date' in c or 'ngay' in c:
-                    col_map[c] = 'datetime'
-                elif 'close' in c:
-                    col_map[c] = 'close'
-                elif 'vol' in c or 'kl' in c or 'volume' in c:
-                    col_map[c] = 'volume'
-            df = df.rename(columns=col_map)
-            
-            if 'close' in df.columns and 'volume' in df.columns:
-                df['vol_ma20'] = df['volume'].rolling(20).mean()
-                latest = df.iloc[-1]
-                prev_vol_ma = latest['vol_ma20']
-                
-                if pd.notna(prev_vol_ma) and prev_vol_ma > 0:
-                    ratio = latest['volume'] / prev_vol_ma
-                    if ratio >= volume_multiplier:
-                        return {
-                            'Mã CP': symbol,
-                            'Thời gian nến': str(latest.get('datetime', 'Mới nhất')),
-                            'Giá hiện tại': latest['close'],
-                            'Khối lượng nến 5p': int(latest['volume']),
-                            'Trung bình 20 nến': int(prev_vol_ma),
-                            'Mức đột biến': f"{round(ratio, 2)}x lần"
-                        }
-    except Exception:
-        pass
-    return None
+st.sidebar.markdown("### ⚙️ Tùy chỉnh quét thời gian thực")
+selected_symbols = st.sidebar.multiselect(
+    "Danh sách mã theo dõi:", DEFAULT_SYMBOLS, default=DEFAULT_SYMBOLS[:30]
+)
+volume_threshold = st.sidebar.slider(
+    "Ngưỡng đột biến khối lượng (X lần so với TB 20 nến 5p):",
+    1.0,
+    5.0,
+    1.6,
+    0.1,
+)
+max_workers = st.sidebar.slider("Số luồng xử lý song song (Tốc độ):", 5, 30, 15)
 
-if st.button("🔍 CHẠY QUÉT THỜI GIAN THỰC NGAY", type="primary"):
-    if not selected_symbols:
-        st.warning("Vui lòng chọn ít nhất một mã cổ phiếu.")
-    else:
-        results = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        total_symbols = len(selected_symbols)
-        completed = 0
-        
-        # Quét đa luồng toàn bộ danh sách lớn cực nhanh
-        with ThreadPoolExecutor(max_workers=max_threads) as executor:
-            future_to_symbol = {executor.submit(scan_single_symbol, sym, volume_multiplier): sym for sym in selected_symbols}
-            
-            for future in as_completed(future_to_symbol):
-                completed += 1
-                progress_bar.progress(completed / total_symbols)
-                status_text.text(f"Đang quét dữ liệu... ({completed}/{total_symbols}) mã")
-                
-                res = future.result()
-                if res:
-                    results.append(res)
-                    
-        status_text.empty()
-        progress_bar.empty()
-        
-        if results:
-            res_df = pd.DataFrame(results)
-            st.success(f"🔥 Phát hiện {len(res_df)} mã đang có dòng tiền lớn kích hoạt ở khung 5 phút!")
-            st.dataframe(res_df, use_container_width=True)
-        else:
-            st.warning("Hiện tại chưa có mã nào chạm ngưỡng đột biến trong khung 5 phút vừa qua.")
+
+def check_stock(symbol):
+  try:
+    df = stock_historical_data(
+        symbol=symbol,
+        resolution="5",
+        start_date="2026-01-01",
+        end_date=datetime.now().strftime("%Y-%m-%d"),
+        source="VCI",
+    )
+    if df is not None and len(df) > 20:
+      df["Vol_MA20"] = df["volume"].rolling(window=20).mean()
+      last_row = df.iloc[-1]
+      prev_vol_ma = last_row["Vol_MA20"]
+      last_vol = last_row["volume"]
+      last_close = last_row["close"]
+      prev_close = df.iloc[-2]["close"]
+      price_change = ((last_close - prev_close) / prev_close) * 100
+
+      if prev_vol_ma > 0 and last_vol >= (prev_vol_ma * volume_threshold):
+        return {
+            "Mã": symbol,
+            "Giá Hiện Tại": last_close,
+            "Biến Động (%)": round(price_change, 2),
+            "Khối Lượng Nến Cuối": int(last_vol),
+            "TB 20 Nến (5p)": int(prev_vol_ma),
+            "Đột Biến (Lần)": round(last_vol / prev_vol_ma, 2),
+        }
+  except Exception:
+    pass
+  return None
+
+
+if st.button(
+    "🔍 CHẠY QUÉT THỜI GIAN THỰC NGAY", type="primary", use_container_width=True
+):
+  if not selected_symbols:
+    st.warning("Vui lòng chọn ít nhất một mã cổ phiếu để quét.")
+  else:
+    with st.spinner(
+        "Đang quét dữ liệu thời gian thực toàn bộ danh sách mã..."
+    ):
+      results = []
+      start_time = time.time()
+
+      with concurrent.futures.ThreadPoolExecutor(
+          max_workers=max_workers
+      ) as executor:
+        futures = {
+            executor.submit(check_stock, sym): sym for sym in selected_symbols
+        }
+        for future in concurrent.futures.as_completed(futures):
+          res = future.result()
+          if res:
+            results.append(res)
+
+      elapsed_time = time.time() - start_time
+      st.success(
+          f"Quét hoàn tất {len(selected_symbols)} mã trong {elapsed_time:.2f}"
+          " giây!"
+      )
+
+      if results:
+        res_df = pd.DataFrame(results)
+        res_df = res_df.sort_values(by="Đột Biến (Lần)", ascending=False)
+        st.dataframe(res_df, use_container_width=True)
+      else:
+        st.info(
+            "Hiện tại chưa có mã nào chạm ngưỡng đột biến trong khung 5 phút"
+            " vừa qua."
+        )
 
 st.markdown("---")
-st.markdown("💡 *Mẹo thực chiến: Trong phiên giao dịch, bạn hãy mở trang web này và bấm nút quét liên tục để nắm bắt ngay các mã đang bùng nổ thanh khoản.*")
+st.markdown(
+    "💡 *Mẹo thực chiến: Trong phiên giao dịch, bạn hãy mở trang web này và"
+    " bấm nút quét liên tục để nắm bắt ngay các mã đang bùng nổ thanh khoản.*"
+)
 
